@@ -18,6 +18,7 @@
 
 import logging
 import os
+import math
 import random
 import sys
 from dataclasses import dataclass, field
@@ -25,6 +26,10 @@ from typing import Optional
 
 import numpy as np
 from datasets import load_dataset, load_metric
+from transformers.file_utils import (
+    is_torch_tpu_available,
+)
+import torch.distributed as dist
 
 import transformers
 from transformers import (
@@ -168,6 +173,10 @@ class SchedulerArguments:
     cycle: bool = field(
         default=False,
         metadata={"help": "Cycle after global_step > decay_steps"},
+    )
+    warmup_prop: float = field(
+        default=0.1,
+        metadata={"help": "Proportion of warm-up steps"}
     )
 
 
@@ -415,6 +424,28 @@ def main():
     else:
         data_collator = None
     
+    if training_args.max_steps is None or training_args.max_steps <= 0:
+        # does not work with TPUs
+        if training_args.local_rank != -1:
+            world_size = dist.get_world_size()
+        else:
+            world_size = 1
+
+        # this code works only for SINGLE node, single- or multi-GPU training!
+        total_train_batch_size = training_args.per_device_train_batch_size * world_size
+        len_train_dataloader = math.floor(len(train_dataset) / total_train_batch_size) \
+            if training_args.dataloader_drop_last else math.ceil(len(train_dataset) / total_train_batch_size)
+
+        grad_acc = training_args.gradient_accumulation_steps
+        epochs = training_args.num_train_epochs
+
+
+        num_update_steps_per_epoch = max(len_train_dataloader // grad_acc, 1)
+        max_steps = math.ceil(epochs * num_update_steps_per_epoch)
+    else:
+        max_steps = training_args.max_steps
+    
+    logger.warn(f"Computed steps: {max_steps}")
 
     def divide_params(named_parameters, **kwargs):
         no_decay = ["bias", "LayerNorm.weight"]
@@ -466,12 +497,12 @@ def main():
 
     sched = PolynomialLayerwiseDecaySchedulerWithWarmup(
         optim,
-        training_args.max_steps,
+        max_steps,
         end_learning_rate=sched_arguments.end_learning_rate,
         lr_decay_power=sched_arguments.lr_decay_power,
         layerwise_lr_decay_power=sched_arguments.layerwise_lr_decay_power,
         cycle=sched_arguments.cycle,
-        warmup_steps=training_args.warmup_steps
+        warmup_steps=max(training_args.warmup_steps, sched_arguments.warmup_prop * max_steps)
     )
 
     # Initialize our Trainer
