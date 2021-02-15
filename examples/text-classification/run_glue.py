@@ -41,6 +41,8 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
+from transformers_lightning.schedulers import PolynomialLayerwiseDecaySchedulerWithWarmup
+from transformers_lightning.optimizers import ElectraAdamW
 
 
 task_to_keys = {
@@ -148,19 +150,39 @@ class ModelArguments:
         },
     )
 
+@dataclass
+class SchedulerArguments:
+    """
+    Arguments pertaining to which model/config/tokenizer we are going to fine-tune from.
+    """
+
+    end_learning_rate: float = field(
+        metadata={"help": "Final lr"}
+    )
+    lr_decay_power: float = field(
+        default=None, metadata={"help": "Power of lr decay"}
+    )
+    layerwise_lr_decay_power: float = field(
+        default=0.8, metadata={"help": "Base of layerwise lr decay power"}
+    )
+    cycle: bool = field(
+        default=False,
+        metadata={"help": "Cycle after global_step > decay_steps"},
+    )
+
 
 def main():
     # See all possible arguments in src/transformers/training_args.py
     # or by passing the --help flag to this script.
     # We now keep distinct sets of args, for a cleaner separation of concerns.
 
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments, SchedulerArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
-        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+        model_args, data_args, training_args, sched_arguments = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
     else:
-        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+        model_args, data_args, training_args, sched_arguments = parser.parse_args_into_dataclasses()
 
     # Detecting last checkpoint.
     last_checkpoint = None
@@ -392,6 +414,65 @@ def main():
         data_collator = DataCollatorWithPadding(tokenizer, pad_to_multiple_of=8)
     else:
         data_collator = None
+    
+
+    def divide_params(named_parameters, **kwargs):
+        no_decay = ["bias", "LayerNorm.weight"]
+        weight_decay = kwargs["weight_decay"]
+        del kwargs["weight_decay"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in named_parameters if not any(nd in n for nd in no_decay)],
+                "weight_decay": weight_decay,
+                **kwargs
+            },
+            {
+                "params": [p for n, p in named_parameters if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+                **kwargs
+            }
+        ]
+        return optimizer_grouped_parameters
+    
+    # add parameters to model with right depth
+    param_groups = []
+
+    if config.model_type == "roberta":
+
+        depth = 0
+        param_groups += divide_params(model.roberta.embeddings.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+        depth += 1
+
+        for layer in model.roberta.encoder.layer:
+            param_groups += divide_params(layer.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+            depth += 1
+        depth += 1 # as in ELECTRA, https://github.com/google-research/electra/issues/64
+
+        if hasattr(model.roberta, "pooler") and model.roberta.pooler is not None:
+            param_groups += divide_params(model.roberta.pooler.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+
+        param_groups += divide_params(model.classifier.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+
+    else:
+        raise ValueError(f"Layerwise decay not implemented yet for model type {config.model_type}")
+
+    optim = ElectraAdamW(
+        param_groups,
+        lr=training_args.learning_rate,
+        betas=(training_args.adam_beta1, training_args.adam_beta2),
+        eps=training_args.adam_epsilon,
+        weight_decay=training_args.weight_decay
+    )
+
+    sched = PolynomialLayerwiseDecaySchedulerWithWarmup(
+        optim,
+        training_args.max_steps,
+        end_learning_rate=sched_arguments.end_learning_rate,
+        lr_decay_power=sched_arguments.lr_decay_power,
+        layerwise_lr_decay_power=sched_arguments.layerwise_lr_decay_power,
+        cycle=sched_arguments.cycle,
+        warmup_steps=training_args.warmup_steps
+    )
 
     # Initialize our Trainer
     trainer = Trainer(
@@ -402,6 +483,7 @@ def main():
         compute_metrics=compute_metrics,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        optimizers=(optim, sched)
     )
 
     # Training
