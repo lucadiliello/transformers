@@ -26,9 +26,6 @@ from typing import Optional
 
 import numpy as np
 from datasets import load_dataset, load_metric
-from transformers.file_utils import (
-    is_torch_tpu_available,
-)
 import torch.distributed as dist
 
 import transformers

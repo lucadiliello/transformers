@@ -51,4 +51,5 @@ deps = {
     "unidic": "unidic>=1.0.2",
     "unidic_lite": "unidic_lite>=1.0.7",
     "uvicorn": "uvicorn",
+    "transformers-lightning": "transformers-lightning>=0.5.1",
 }
