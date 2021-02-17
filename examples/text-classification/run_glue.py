@@ -467,37 +467,31 @@ def main():
 
     logger.info(f"Model type: {config.model_type}")
 
+    # ROBERTA
     if config.model_type == "roberta":
 
-        depth = 0
-        param_groups += divide_params(model.roberta.embeddings.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
-        depth += 1
+        param_groups += divide_params(model.roberta.embeddings.named_parameters(), weight_decay=training_args.weight_decay, depth=0)
 
-        for layer in model.roberta.encoder.layer:
-            param_groups += divide_params(layer.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
-            depth += 1
-        depth += 1 # as in ELECTRA, https://github.com/google-research/electra/issues/64
+        for i, layer in enumerate(model.roberta.encoder.layer):
+            param_groups += divide_params(layer.named_parameters(), weight_decay=training_args.weight_decay, depth=i+1)
 
+        n_layers = len(model.roberta.encoder.layer)
         if hasattr(model.roberta, "pooler") and model.roberta.pooler is not None:
-            param_groups += divide_params(model.roberta.pooler.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+            param_groups += divide_params(model.roberta.pooler.named_parameters(), weight_decay=training_args.weight_decay, depth=n_layers+2)
 
-        param_groups += divide_params(model.classifier.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+        param_groups += divide_params(model.classifier.named_parameters(), weight_decay=training_args.weight_decay, depth=n_layers+2)
 
-
+    # ELECTRA
     elif config.model_type == "electra":
 
-        depth = 0
-        param_groups += divide_params(model.electra.embeddings.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+        param_groups += divide_params(model.electra.embeddings.named_parameters(), weight_decay=training_args.weight_decay, depth=0)
         if hasattr(model.electra, "embeddings_project"):
-            param_groups += divide_params(model.electra.embeddings_project.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
-        depth += 1
+            param_groups += divide_params(model.electra.embeddings_project.named_parameters(), weight_decay=training_args.weight_decay, depth=0)
 
-        for layer in model.electra.encoder.layer:
-            param_groups += divide_params(layer.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
-            depth += 1
-        depth += 1 # as in ELECTRA, https://github.com/google-research/electra/issues/64
+        for i, layer in enumerate(model.electra.encoder.layer):
+            param_groups += divide_params(layer.named_parameters(), weight_decay=training_args.weight_decay, depth=i+1)
 
-        param_groups += divide_params(model.classifier.named_parameters(), weight_decay=training_args.weight_decay, depth=depth)
+        param_groups += divide_params(model.classifier.named_parameters(), weight_decay=training_args.weight_decay, depth=len(model.electra.encoder.layer)+2)
 
     else:
         raise ValueError(f"Layerwise decay not implemented yet for model type {config.model_type}")
@@ -512,7 +506,7 @@ def main():
 
     sched = PolynomialLayerwiseDecaySchedulerWithWarmup(
         optim,
-        max_steps,
+        num_training_steps=max_steps,
         end_learning_rate=sched_arguments.end_learning_rate,
         lr_decay_power=sched_arguments.lr_decay_power,
         layerwise_lr_decay_power=sched_arguments.layerwise_lr_decay_power,
