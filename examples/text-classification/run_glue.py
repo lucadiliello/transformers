@@ -44,7 +44,7 @@ from transformers import (
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
 from transformers_lightning.schedulers import PolynomialLayerwiseDecaySchedulerWithWarmup
-from transformers_lightning.optimizers import ElectraAdamW
+from optim import ElectraAdamW
 
 
 task_to_keys = {
